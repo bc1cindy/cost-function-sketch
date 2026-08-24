@@ -41,6 +41,7 @@ pub use decision_tree::{
 pub use intent::{
     FixedPaymentInstructions, INFINITE_COST, Intent, IntentId, IntentWithPolicy, PeerIdentity,
 };
+pub use privacy::{CoinScore, PlaceholderScore, PrivacyTerm, PrivacyTermBuilder};
 pub use queue::Queue;
 pub use refinement::Refined;
 pub use selection::{

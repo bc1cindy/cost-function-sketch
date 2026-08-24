@@ -4,7 +4,6 @@
 
 /// Exponents with |p| below this are treated as the geometric-mean limit (p = 0),
 /// where the direct power-mean formula is numerically unstable.
-#[allow(dead_code)]
 const GEOMETRIC_EPS: f64 = 1e-6;
 
 /// Power mean of the values yielded by `xs` (each expected in `[0,1]`) with exponent `p`.
@@ -16,7 +15,6 @@ const GEOMETRIC_EPS: f64 = 1e-6;
 /// - any zero in `xs` with `p <= 0.0` -> `0.0`
 ///
 /// Always returns a value in `[min(xs), max(xs)]`.
-#[allow(dead_code)]
 pub(crate) fn generalized_mean(xs: impl IntoIterator<Item = f64>, p: f64) -> f64 {
     debug_assert!(!p.is_nan(), "power-mean exponent must not be NaN");
     let iter = xs.into_iter();
@@ -136,6 +134,78 @@ impl CoinScore for PlaceholderScore {
     }
 }
 
+/// A privacy term. [`PrivacyTerm::evaluate`] returns a value in `[0,1]`.
+///
+/// The value is a conservative lower bound (weight-of-evidence style), NOT a
+/// privacy score or guarantee: it may only understate how well coins dissolve,
+/// never overstate it. Higher = more dissolved = less linkable by amount.
+#[derive(Clone, Debug)]
+pub struct PrivacyTerm<S> {
+    scorer: S,
+    exponent: f64,
+}
+
+impl<S: CoinScore> PrivacyTerm<S> {
+    /// How well `mine` dissolves into `theirs` by amount, in `[0,1]`.
+    /// Generalized mean over each of my coins' per-coin scores.
+    ///
+    /// Monotone: adding a `theirs` amount never lowers the result (up to
+    /// rounding). Adding one of `mine` is NOT guaranteed monotone — it inserts a
+    /// new term into the mean, which can pull it down.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scorer returns a value outside `[0,1]` (including NaN).
+    pub fn evaluate(&self, mine: &[u64], theirs: &[u64]) -> f64 {
+        generalized_mean(
+            mine.iter().map(|&c| {
+                let s = self.scorer.score(c, theirs);
+                assert!((0.0..=1.0).contains(&s), "score out of [0,1]: {s}");
+                s
+            }),
+            self.exponent,
+        )
+    }
+}
+
+/// Builds a [`PrivacyTerm`]: sets the per-coin scorer and the power-mean
+/// exponent (the strictness knob: `p -> -inf` = worst coin dominates).
+#[derive(Clone, Debug)]
+pub struct PrivacyTermBuilder<S> {
+    scorer: S,
+    exponent: f64,
+}
+
+impl<S: CoinScore> PrivacyTermBuilder<S> {
+    /// Default exponent `-1.0` (harmonic mean: a poorly-covered coin drags the
+    /// result down — conservative).
+    pub fn new(scorer: S) -> Self {
+        Self {
+            scorer,
+            exponent: -1.0,
+        }
+    }
+
+    /// Sets the power-mean exponent; any non-NaN `f64` (including `±inf`) is a
+    /// valid strictness setting.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `p` is NaN.
+    pub fn exponent(mut self, p: f64) -> Self {
+        assert!(!p.is_nan(), "power-mean exponent must not be NaN");
+        self.exponent = p;
+        self
+    }
+
+    pub fn build(self) -> PrivacyTerm<S> {
+        PrivacyTerm {
+            scorer: self.scorer,
+            exponent: self.exponent,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +291,58 @@ mod tests {
             pool.push(extra);
             assert!(PlaceholderScore.score(100, &pool) >= base - 1e-12);
         }
+    }
+
+    fn term() -> PrivacyTerm<PlaceholderScore> {
+        PrivacyTermBuilder::new(PlaceholderScore).build()
+    }
+
+    #[test]
+    fn evaluate_empty_mine_is_one() {
+        assert_eq!(term().evaluate(&[], &[10, 20]), 1.0);
+    }
+
+    #[test]
+    fn evaluate_single_coin_default_exponent() {
+        // one coin, score = 0.5; harmonic mean of one value = that value
+        assert!((term().evaluate(&[100], &[50]) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn evaluate_two_equal_coins() {
+        // both score 0.5; harmonic mean = 0.5
+        assert!((term().evaluate(&[100, 100], &[50]) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn exponent_override_changes_result() {
+        let min_term = PrivacyTermBuilder::new(PlaceholderScore)
+            .exponent(f64::NEG_INFINITY)
+            .build();
+        // scores: coin 100 -> 0.5 (pool {50}), coin 10 -> 0.0 (pool {50} has none <= 10)
+        // min = 0.0
+        assert_eq!(min_term.evaluate(&[100, 10], &[50]), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be NaN")]
+    fn nan_exponent_is_rejected() {
+        let _ = PrivacyTermBuilder::new(PlaceholderScore).exponent(f64::NAN);
+    }
+
+    struct OutOfRangeScore;
+
+    impl CoinScore for OutOfRangeScore {
+        fn score(&self, _coin: u64, _pool: &[u64]) -> f64 {
+            f64::NAN
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "score out of [0,1]")]
+    fn out_of_range_score_is_rejected() {
+        let _ = PrivacyTermBuilder::new(OutOfRangeScore)
+            .build()
+            .evaluate(&[100], &[50]);
     }
 }
