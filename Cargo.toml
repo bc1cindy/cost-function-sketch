@@ -9,3 +9,6 @@ bitcoin = { version = "=0.32.8", features = ["base64"] }
 concurrent-psbt = { git = "https://github.com/fungi-protocol/concurrent-psbt", branch = "develop" }
 bitcoin-coin-selection = { git = "https://github.com/p2pderivatives/rust-bitcoin-coin-selection", rev = "59f0b53e60f762a75ad5c43b3ee49eb4dc05f353", version = "0.8.5" }
 bitcoin-units = "=1.0.0-rc.2"
+
+[dev-dependencies]
+proptest = "1"

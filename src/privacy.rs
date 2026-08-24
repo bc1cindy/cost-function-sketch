@@ -208,6 +208,8 @@ impl<S: CoinScore> PrivacyTermBuilder<S> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -344,5 +346,113 @@ mod tests {
         let _ = PrivacyTermBuilder::new(OutOfRangeScore)
             .build()
             .evaluate(&[100], &[50]);
+    }
+
+    /// Small and large finite exponents, the geometric limit and both sides
+    /// of its cutoff, plus the min/max limits, so the contract proptests
+    /// cover every regime of the power mean.
+    fn any_exponent() -> impl Strategy<Value = f64> {
+        prop_oneof![
+            6 => -3.0f64..3.0,
+            2 => prop_oneof![-1e12f64..-3.0, 3.0f64..1e12],
+            1 => Just(0.0),
+            1 => -1e-5f64..1e-5,
+            1 => Just(f64::NEG_INFINITY),
+            1 => Just(f64::INFINITY),
+        ]
+    }
+
+    proptest! {
+        /// Guaranteed contract: adding a not-mine amount never lowers the
+        /// term, whatever the exponent.
+        #[test]
+        fn adding_theirs_never_lowers(
+            mine in prop::collection::vec(1u64..1_000_000, 0..8),
+            theirs in prop::collection::vec(1u64..1_000_000, 0..12),
+            extra in 1u64..1_000_000,
+            p in any_exponent(),
+        ) {
+            let term = PrivacyTermBuilder::new(PlaceholderScore).exponent(p).build();
+            let before = term.evaluate(&mine, &theirs);
+            let mut theirs2 = theirs.clone();
+            theirs2.push(extra);
+            let after = term.evaluate(&mine, &theirs2);
+            // Rounding slack only once score^p (>= 0.5^p) can leave f64 range.
+            let slack = if p.is_finite() && p.abs() >= 1e3 { f64::EPSILON * before } else { 0.0 };
+            prop_assert!(after >= before - slack, "p={p} before={before} after={after}");
+        }
+
+        /// Raising any one value never lowers the mean.
+        #[test]
+        fn mean_never_decreases(
+            xs in prop::collection::vec(prop_oneof![Just(0.0), 1e-100f64..=1.0], 1..10),
+            i in 0usize..10,
+            bump in prop_oneof![0.0f64..1e-15, 0.0f64..1.0],
+            p in prop_oneof![-3.0f64..3.0, Just(f64::NEG_INFINITY), Just(f64::INFINITY)],
+        ) {
+            let i = i % xs.len();
+            let mut ys = xs.clone();
+            ys[i] = (ys[i] + bump).min(1.0);
+            let a = generalized_mean(xs.iter().copied(), p);
+            let b = generalized_mean(ys.iter().copied(), p);
+            prop_assert!(b >= a, "p={p} a={a} b={b}");
+        }
+
+        /// `evaluate` must stay in `[0,1]` across random inputs and exponents,
+        /// including exponents near zero (the geometric-mean limit).
+        #[test]
+        fn evaluate_stays_in_unit_interval(
+            mine in prop::collection::vec(1u64..1_000_000, 0..8),
+            theirs in prop::collection::vec(1u64..1_000_000, 0..12),
+            p in any_exponent(),
+        ) {
+            let term = PrivacyTermBuilder::new(PlaceholderScore).exponent(p).build();
+            let v = term.evaluate(&mine, &theirs);
+            prop_assert!((0.0..=1.0).contains(&v), "evaluate out of [0,1]: {v} (p={p})");
+        }
+
+        /// The mean never leaves `[min, max]`, even for clustered values.
+        #[test]
+        fn stays_within_min_max(
+            base in 0.0f64..=1.0,
+            spread in prop_oneof![Just(0.0), 0.0f64..1e-12, 0.0f64..1.0],
+            ks in prop::collection::vec(0.0f64..=1.0, 1..12),
+            p in prop_oneof![any_exponent(), -1e-3f64..1e-3],
+        ) {
+            let xs: Vec<f64> = ks.iter().map(|k| (base + k * spread).min(1.0)).collect();
+            let lo = xs.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let m = generalized_mean(xs.iter().copied(), p);
+            prop_assert!((lo..=hi).contains(&m), "p={p} lo={lo} hi={hi} m={m}");
+        }
+
+        /// Oracle: the single-pass implementation must agree with a naive
+        /// two-pass version of the power-mean definition away from the geometric limit.
+        #[test]
+        fn matches_naive_power_mean(
+            xs in prop::collection::vec(0.0f64..=1.0, 1..10),
+            p in prop_oneof![-3.0f64..-0.01, 0.01f64..3.0],
+        ) {
+            let naive = if p < 0.0 && xs.iter().any(|&x| x <= 0.0) {
+                0.0
+            } else {
+                let s: f64 = xs.iter().map(|&x| x.powf(p)).sum();
+                (s / xs.len() as f64).powf(1.0 / p)
+            };
+            let fast = generalized_mean(xs.iter().copied(), p);
+            prop_assert!((fast - naive).abs() < 1e-9, "p={p} fast={fast} naive={naive}");
+        }
+
+        /// Oracle: inside the geometric limit the log-space implementation
+        /// must agree with the n-th root of the direct product.
+        #[test]
+        fn matches_naive_geometric_mean(
+            xs in prop::collection::vec(prop_oneof![1 => Just(0.0), 9 => 0.0f64..=1.0], 1..10),
+            p in prop_oneof![Just(0.0), -GEOMETRIC_EPS..GEOMETRIC_EPS],
+        ) {
+            let naive = xs.iter().product::<f64>().powf(1.0 / xs.len() as f64);
+            let fast = generalized_mean(xs.iter().copied(), p);
+            prop_assert!((fast - naive).abs() < 1e-9, "p={p} fast={fast} naive={naive}");
+        }
     }
 }
