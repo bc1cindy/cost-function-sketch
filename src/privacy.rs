@@ -111,6 +111,31 @@ pub(crate) fn generalized_mean(xs: impl IntoIterator<Item = f64>, p: f64) -> f64
     mean.max(lo).min(hi)
 }
 
+/// Per-coin score, pluggable. Placeholder now; the radix backend (in the
+/// separate `privacy-metrics` crate) implements this later.
+///
+/// The value is a conservative measure, not a privacy guarantee.
+pub trait CoinScore {
+    /// Score of `coin` given the `pool` of not-mine amounts, in `[0,1]`.
+    ///
+    /// Contract: monotone non-decreasing in `pool` — adding a pool amount never
+    /// lowers the value.
+    fn score(&self, coin: u64, pool: &[u64]) -> f64;
+}
+
+/// Deliberately crude stand-in: NOT a real cover measure. Its only jobs are to
+/// be in `[0,1]` and monotone in `pool`, so the term's shape and the
+/// monotonicity proptest are exercised. Replaced by the radix backend later.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaceholderScore;
+
+impl CoinScore for PlaceholderScore {
+    fn score(&self, coin: u64, pool: &[u64]) -> f64 {
+        let k = pool.iter().filter(|&&p| p <= coin).count() as i32;
+        1.0 - 2f64.powi(-k)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +193,33 @@ mod tests {
         for (xs, p) in [([1e-5, 0.9], -70.0), ([0.01, 0.02], 200.0)] {
             let m = generalized_mean(xs, p);
             assert!((xs[0]..=xs[1]).contains(&m), "p={p} m={m}");
+        }
+    }
+
+    #[test]
+    fn placeholder_empty_pool_is_zero() {
+        assert_eq!(PlaceholderScore.score(100, &[]), 0.0);
+    }
+
+    #[test]
+    fn placeholder_grows_with_eligible_pool() {
+        assert!((PlaceholderScore.score(100, &[50]) - 0.5).abs() < 1e-9);
+        assert!((PlaceholderScore.score(100, &[50, 60]) - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn placeholder_ignores_too_large_pool_amounts() {
+        // 200 > 100, not eligible -> k stays 0 -> score 0
+        assert_eq!(PlaceholderScore.score(100, &[200]), 0.0);
+    }
+
+    #[test]
+    fn placeholder_monotone_in_pool() {
+        let base = PlaceholderScore.score(100, &[30, 40]);
+        for extra in [10u64, 100, 500] {
+            let mut pool = vec![30u64, 40];
+            pool.push(extra);
+            assert!(PlaceholderScore.score(100, &pool) >= base - 1e-12);
         }
     }
 }
