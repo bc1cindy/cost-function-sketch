@@ -26,6 +26,7 @@
 pub mod blockspace;
 pub mod decision_tree;
 pub mod intent;
+pub mod privacy;
 pub mod queue;
 pub mod refinement;
 pub mod selection;
